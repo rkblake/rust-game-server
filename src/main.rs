@@ -1,30 +1,6 @@
-//! A chat server that broadcasts a message to all connections.
-//!
-//! This example is explicitly more verbose than it has to be. This is to
-//! illustrate more concepts.
-//!
-//! A chat server for telnet clients. After a telnet client connects, the first
-//! line should contain the client's name. After that, all lines sent by a
-//! client are broadcasted to all other connected clients.
-//!
-//! Because the client is telnet, lines are delimited by "\r\n".
-//!
-//! You can test this out by running:
-//!
-//!     cargo run --example chat
-//!
-//! And then in another terminal run:
-//!
-//!     telnet localhost 6142
-//!
-//! You can run the `telnet` command in any number of additional windows.
-//!
-//! You can run the second command in multiple windows and then chat between the
-//! two, seeing the messages from the other client as they're received. For all
-//! connected clients they'll all join the same room and see everyone else's
-//! messages.
-
-#![warn(rust_2018_idioms)]
+// #![warn(rust_2018_idioms)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
 
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, Mutex};
@@ -39,23 +15,26 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use bytes::{BytesMut, BufMut, Bytes};
+use bytes::{BytesMut, /*BufMut, Bytes*/};
 use std::time::{Instant};
 use std::{thread, time};
-use std::str;
+// use std::str;
+use tracing::{info, debug, error, Level};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
-    // Configure a `tracing` subscriber that logs traces emitted by the chat server.
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("chat=info".parse()?))
-        .with_span_events(FmtSpan::FULL)
-        .init();
-
+    use tracing_subscriber::{/*fmt::format::FmtSpan, EnvFilter,*/ FmtSubscriber};
+    //tracing_subscriber::fmt()
+    //   .with_env_filter(EnvFilter::from_default_env().add_directive("chat=info".parse()?))
+    //    .with_span_events(FmtSpan::FULL)
+    //    .init();
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::TRACE)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting subscriber failed");
 
     let state = Arc::new(Mutex::new(Shared::new()));
-    let game_state = Arc::new(Mutex::new(GameState {pos:HashMap::new(), names:HashMap::new()}));
+    // let game_state = Arc::new(Mutex::new(GameState {pos:HashMap::new(), names:HashMap::new()}));
 
     let addr = env::args()
         .nth(1)
@@ -65,31 +44,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(&addr).await?;
     let udp_socket = UdpSocket::bind(&addr).await?;
 
-    tracing::info!("server running on {}", addr);
+    info!("server running on {}", addr);
 
-    let _ = tcp_accept_loop(listener, Arc::clone(&state), Arc::clone(&game_state)).await?;
+    //let _ = tcp_accept_loop(listener, Arc::clone(&state), Arc::clone(&game_state)).await?;
 
-    let _ = udp_loop(udp_socket, Arc::clone(&game_state));
+    //let _ = udp_loop(udp_socket, Arc::clone(&game_state));
     
-    let _ = game_loop(Arc::clone(&state), Arc::clone(&game_state));
     
+    let cloned_state = Arc::clone(&state);
+    // let cloned_game_state = Arc::clone(&game_state);
+    tokio::spawn(async move { let _ = tcp_accept_loop(listener, cloned_state); });
+
+    // let cloned_game_state2 = Arc::clone(&game_state);
+    tokio::spawn(async move { let _ = udp_loop(udp_socket); });
+
+    let _ = game_loop(Arc::clone(&state)).await?;
+
     Ok(())
 }
 
-async fn tcp_accept_loop(listener: TcpListener, state: Arc<Mutex<Shared>>, game_state: Arc<Mutex<GameState>>) -> Result<(), Box<dyn Error>> {
+async fn tcp_accept_loop(listener: TcpListener, state: Arc<Mutex<Shared>>) -> Result<(), Box<dyn Error>> {
+    println!("TCP Accept loop starting");
     loop {
         // Asynchronously wait for an inbound TcpStream.
         let (stream, addr) = listener.accept().await?;
 
         // Clone a handle to the `Shared` state for the new connection.
         let state = Arc::clone(&state);
-        let game_state = Arc::clone(&game_state);
+        // let game_state = Arc::clone(&game_state);
 
         // Spawn our handler to be run asynchronously.
         tokio::spawn(async move {
-            tracing::debug!("accepted connection");
-            if let Err(e) = process(state, game_state, stream, addr).await {
-                tracing::info!("an error occurred; error = {:?}", e);
+            debug!("accepted connection");
+            if let Err(e) = process(state, stream, addr).await {
+                info!("an error occurred; error = {:?}", e);
             }
         });
     }
@@ -103,6 +91,8 @@ type Tx = mpsc::UnboundedSender<BytesMut>;
 // type Rx = mpsc::UnboundedReceiver<String>;
 type Rx = mpsc::UnboundedReceiver<BytesMut>;
 
+// type Lobby = Vec<Tx>;
+
 struct Shared {
     peers: HashMap<SocketAddr, Tx>,
 }
@@ -115,10 +105,10 @@ struct Peer {
     rx: Rx,
 }
 
-struct GameState {
-    pos: HashMap<SocketAddr, (f32, f32)>,
-    names: HashMap<SocketAddr, String>,
-}
+// struct GameState {
+//     pos: HashMap<SocketAddr, (f32, f32)>,
+//     names: HashMap<SocketAddr, String>,
+// }
 
 impl Shared {
     /// Create a new, empty, instance of `Shared`.
@@ -167,7 +157,7 @@ impl Peer {
 /// Process an individual chat client
 async fn process(
     state: Arc<Mutex<Shared>>,
-    game_state: Arc<Mutex<GameState>>,
+    // game_state: Arc<Mutex<GameState>>,
     stream: TcpStream,
     addr: SocketAddr,
 ) -> Result<(), Box<dyn Error>> {
@@ -197,12 +187,13 @@ async fn process(
                 // broadcast this message to the other users.
                 Some(Ok(msg)) => {
                     let mut state = state.lock().await;
-                    let mut game_state = game_state.lock().await;
+                    // let mut game_state = game_state.lock().await;
                     
                     let opcode = as_u16_le(&[msg[0], msg[1]]);
                     match opcode {
-                        10 => game_state.names.insert(addr, bytes_to_string(&msg[2 .. msg.len()])),
-                        _ => break
+                        0 => println!("received 0"),
+                        
+                        _ => println!("did not receive 0"),
                     };
 
                     println!("{:?}", msg);
@@ -211,7 +202,7 @@ async fn process(
                 }
                 // An error occurred.
                 Some(Err(e)) => {
-                    tracing::error!(
+                    error!(
                         "an error occurred while processing messages for {}; error = {:?}",
                         pid,
                         e
@@ -236,38 +227,39 @@ async fn process(
     Ok(())
 }
 
-async fn udp_loop(udp_socket: UdpSocket, state: Arc<Mutex<GameState>>) -> Result<(), Box<dyn Error>> {
-    
+// TODO pass in Shared ref so udp_loop can match users by their SocketAddr
+async fn udp_loop(udp_socket: UdpSocket) -> Result<(), Box<dyn Error>> {
+    println!("UDP Loop starting");
     let mut buf: [u8; 508] = [0; 508];
 
     loop {
         let (_size, socket) = udp_socket.recv_from(&mut buf).await?;
 
-        let mut state = state.lock().await;
+        // let mut state = state.lock().await;
         let opcode: u16 = as_u16_le(&buf[0.. 2]);
         match opcode {
-            256 => state.pos.insert(socket, (as_f32_le(&buf[2 .. 6]), as_f32_le(&buf[6 .. 10]))),
-            _ => None
+            0 => println!("received 0"),
+            _ => println!("did not receive 0"),
         };
-
     }
 }
 
-async fn game_loop(state: Arc<Mutex<Shared>>, game_state: Arc<Mutex<GameState>>, udp_socket: UdpSocket) -> Result<(), Box<dyn Error>> {
+async fn game_loop(state: Arc<Mutex<Shared>>, /*udp_socket: UdpSocket*/) -> Result<(), Box<dyn Error>> {
+    println!("Game Loop starting");
     let tick_rate = time::Duration::from_millis(100); //milliseconds
     
     loop {
         let start = Instant::now();
         
-        let game_state = game_state.lock().await;
+        // let game_state = game_state.lock().await;
         let mut state = state.lock().await;
         
         // TODO: broadcast game state
-        let pos: Vec<(f32, f32)> = game_state.pos.values().cloned().collect();
-        for peer in state.peers.iter_mut() {
-            // let _ = peer.1.send(vec_to_bytesmut(pos.clone()));
-            let _ = udp_socket.send_to(&pos, peer.0);
-        }
+        // let pos: Vec<(f32, f32)> = game_state.pos.values().cloned().collect();
+        // for peer in state.peers.iter_mut() {
+        //     let _ = peer.1.send(42);
+        //     //let _ = udp_socket.send_to(&pos, peer.0);
+        // }
 
         let duration = start.elapsed();
         if duration < tick_rate {
@@ -282,28 +274,34 @@ fn as_u16_le(array: &[u8]) -> u16 {
     ((array[1] as u16) <<  8)
 }
 
-fn as_f32_le(array: &[u8]) -> f32 {
-    assert_eq!(array.len(), 4);
-    (((array[0] as u32) <<  0) +
-     ((array[1] as u32) <<  8) +
-     ((array[2] as u32) << 16) +
-     ((array[3] as u32) << 24)) as f32
-}
+// fn as_f32_le(array: &[u8]) -> f32 {
+//     assert_eq!(array.len(), 4);
+//     (((array[0] as u32) <<  0) +
+//      ((array[1] as u32) <<  8) +
+//      ((array[2] as u32) << 16) +
+//      ((array[3] as u32) << 24)) as f32
+// }
 
-fn bytes_to_string(array: &[u8]) -> String {
-    // TODO: handle error cases
-    let string_slice = str::from_utf8(array).unwrap();
+// fn bytes_to_string(array: &[u8]) -> String {
+//     // TODO: handle error cases
+//     let string_slice = str::from_utf8(array).unwrap();
 
-    String::from(string_slice)
-}
+//     String::from(string_slice)
+// }
 
-fn vec_to_bytesmut(src: Vec<(f32, f32)>) -> BytesMut {
-    let mut bytes = BytesMut::new();
+// fn vec_to_bytesmut(src: Vec<(f32, f32)>) -> BytesMut {
+//     let mut bytes = BytesMut::new();
 
-    for i in src {
-        bytes.put_f32(i.0);
-        bytes.put_f32(i.1);
-    }
+//     for i in src {
+//         bytes.put_f32(i.0);
+//         bytes.put_f32(i.1);
+//     }
 
-    bytes
-}
+//     bytes
+// }
+
+//impl std::convert::From<Vec<(f32, f32)>> for u8 {
+//    fn from(vec: Vec<(f32, f32)>) -> Self {
+//        42;
+//    }
+//}
